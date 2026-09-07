@@ -207,7 +207,8 @@ lifted verbatim from the installed Claude Code binary rather than guessed at:
 | Renew | `POST https://platform.claude.com/v1/oauth/token` with `{grant_type: refresh_token, refresh_token, client_id, scope}` — Claude Code's own endpoint, client id, and body |
 | Merge | The response is folded into the stored blob the way Claude Code folds it: new `accessToken` and `expiresAt`, the refresh token replaced only if the server rotated it, and **every other key carried through untouched** — including the `mcpOAuth` tokens Claude Code keeps beside it |
 | Back up | Before writing, the item as it stood is copied to a second keychain entry, `ClaudeUsageBar-credentials-backup` |
-| Write | `security -i` with `add-generic-password -U -a <acct> -s "Claude Code-credentials" -X <hex>` — the same tool, same item, same hex encoding Claude Code uses, so the item is updated in place and its existing access control applies |
+| Write | `add-generic-password -U -a <acct> -s "Claude Code-credentials" -X <hex>` — the same tool, same item, same hex encoding Claude Code uses, so the item is updated in place and its existing access control applies. Under 2 000 characters it goes through `security -i` on stdin; above that, through argv. **That length guard is not optional** — `security -i` reads through a fixed line buffer, and a longer line is silently split, running the head as a real write with a truncated value. It is Claude Code's own guard, and omitting it corrupted this credential once (`FIXES.md` §10a) |
+| Verify | The item is read straight back and compared byte-for-byte with what was sent. A mismatch is reported as a failure, never as success — a quiet mismatch is the one outcome this must never have |
 | Use | The renewed token fetches usage immediately. A failed write is logged, not fatal: the token still works for this session and Claude Code renews its own copy next time it runs |
 
 A renewal that fails outright (`invalid_grant` — the refresh token itself is
@@ -324,8 +325,17 @@ Nothing is hard-coded to one account — no UUIDs, no tokens, no paths outside
   MenuBarStyle gauge` restores the battery, `icon` gives the battery alone.
 - **Undocumented endpoint.** See above.
 - **Shares a credential with Claude Code.** Renewal writes to the same keychain
-  item Claude Code reads. It mirrors Claude Code's own write exactly and backs
-  the item up first, but it is still two programs holding one secret — see
-  *Token expiry and renewal* for the undo.
+  item Claude Code reads, so a bad write would sign you out of Claude Code, not
+  just the widget. Three things guard it: the write mirrors Claude Code's own
+  byte for byte, including its length guard; the item is copied to a backup
+  entry first; and every write is read back and must match exactly or it counts
+  as a failure. Verified live against a throwaway keychain item, 5 KB payload,
+  byte-identical both directions. It is still two programs holding one secret —
+  see *Token expiry and renewal* for the undo.
+
+  **Upgrading from an older clone:** versions at or before `5f762ad` are missing
+  the length guard and will corrupt this item at their first renewal, roughly
+  8 hours after launch. Pull before you build. If a machine already ran one, run
+  `claude` there and sign in again — that rewrites the item cleanly.
 - **Unsigned.** Ad-hoc signed at build time. Fine for a locally built app; it
   would need a Developer ID and notarization to distribute to others.
