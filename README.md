@@ -46,8 +46,11 @@ what a number means — they just answer different questions.
 |---|---|
 | macOS | 12 or later |
 | Xcode Command Line Tools | `xcode-select --install` |
-| Claude Code CLI | `npm install -g @anthropic-ai/claude-code`, then `claude` and sign in once |
-| Claude plan | Any plan with usage limits (Pro, Max 5x, Max 20x) |
+| Claude Code CLI | `npm install -g @anthropic-ai/claude-code`, then `claude` and sign in once — choose **1. Claude account with subscription**, not the Console/API option |
+| Claude plan | Any plan with usage limits (Pro, Max 5x, Max 20x). A Console/API login has no plan limits, so the widget has nothing to show |
+
+Sign in once and you're done: the widget renews the token itself when it
+expires, the same way Claude Code does. See *Token expiry and renewal* below.
 
 ## Install
 

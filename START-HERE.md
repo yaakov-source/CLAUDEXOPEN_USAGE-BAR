@@ -49,9 +49,15 @@ Now sign in:
 claude
 ```
 
-Answer the setup questions, and when it asks how you want to log in, choose the
-option for your **Claude subscription** (not an API key). A browser window
-opens — log in there. When you land back at the Claude prompt, type:
+Answer the setup questions. When it shows **Select login method**, choose:
+
+```
+1. Claude account with subscription
+```
+
+Not option 2 (Console / API). The widget shows your plan's usage limits, and
+only a subscription login has those. A browser window opens — log in there.
+When you land back at the Claude prompt, type:
 
 ```
 /exit
@@ -59,8 +65,9 @@ opens — log in there. When you land back at the Claude prompt, type:
 
 **Why this step exists:** the widget needs permission to read your usage
 numbers. Signing in to Claude Code once puts a key on your Mac that the widget
-borrows. The Claude desktop app doesn't leave one behind, so this is the only
-way. You never have to open `claude` again after this.
+borrows — and renews by itself when it runs out, the same way Claude Code
+does. The Claude desktop app doesn't leave one behind, so this is the only
+way. You should never have to open `claude` for the widget again.
 
 ---
 
@@ -103,11 +110,19 @@ osascript -e 'tell application "System Events" to make login item at end with pr
 
 ## If it stops working
 
-**The icon shows `!`** — your sign-in key expired. Open Terminal, type
-`claude`, wait for it to load, type `/exit`. That refreshes it. Then click the
-widget and press Refresh.
+Most of the time it won't. Your sign-in key runs out every 8 hours or so, and
+the widget renews it on its own.
 
-**The icon shows `—`** — click it; the popover explains what's wrong.
+**The icon shows `!`** — the key couldn't be renewed, usually because you
+signed out of Claude Code. Click the widget, then click **Open Terminal and
+run claude**. Sign in (option 1 again), type `/exit`, and the widget picks it
+up by itself within a few minutes.
+
+**The icon shows `—`** — click it; the popover explains what's wrong. If it
+says *No Claude token found*, do Step 2 again.
+
+**It says "Offline"** — your Mac lost its connection. It keeps showing the last
+numbers and retries when you're back online. Nothing to do.
 
 ---
 
