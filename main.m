@@ -64,19 +64,25 @@ static long RemainingPercent(LimitInfo *limit) {
     return (long)lround(RemainingFraction(limit) * 100);
 }
 
-/// How much menu bar to occupy. On a notched Mac with a crowded bar, macOS
-/// silently drops whatever doesn't fit, so width is the difference between the
-/// widget existing and the widget being visible.
+/// How much menu bar to occupy.
 ///
-///   compact  just the number, ~26pt   (default)
-///   gauge    battery + number, ~55pt  (the original)
+///   gauge    battery + number, ~55pt  (default)
+///   compact  just the number, ~26pt
 ///   icon     battery only, ~29pt
 ///
-/// Change with: defaults write com.haicreative.claudeusagebar MenuBarStyle gauge
+/// Change with: defaults write com.haicreative.claudeusagebar MenuBarStyle compact
+///
+/// The battery is the default because it is the thing people install this for,
+/// and a fresh clone has to look right without anyone running `defaults write`.
+/// `compact` exists for the real failure it was written for: on a notched Mac
+/// with a crowded bar, macOS silently drops whatever doesn't fit, so width can
+/// be the difference between the widget existing and the widget being visible.
+/// It was briefly the default, which meant every new user got a bare percentage
+/// and no way to know the battery was there at all.
 static NSString *MenuBarStyle(void) {
     NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:@"MenuBarStyle"];
-    if ([style isEqualToString:@"gauge"] || [style isEqualToString:@"icon"]) return style;
-    return @"compact";
+    if ([style isEqualToString:@"compact"] || [style isEqualToString:@"icon"]) return style;
+    return @"gauge";
 }
 
 /// Solid colour for the compact style, which has no bar to carry the gradient.
@@ -1831,7 +1837,7 @@ static BOOL IsTransientNetworkError(NSError *error) {
         return;
     }
 
-    BOOL compact = ![style isEqualToString:@"gauge"];
+    BOOL compact = [style isEqualToString:@"compact"];
     button.image = compact ? nil : image;
 
     NSString *text = compact ? title : [@" " stringByAppendingString:title];

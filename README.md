@@ -27,7 +27,9 @@ without the explanations.
   much is **left** — 100% on an untouched plan, draining as you work. That is
   the one limit that actually stops you working, and a battery reading 0% when
   nothing has been used looks broken. Purple under 75% used, orange at 75%, red
-  at 90% — or whatever `severity` the API reports, if that's more severe.
+  at 90% — or whatever `severity` the API reports, if that's more severe. If
+  your menu bar is too full to fit it, see *Known limitations* for narrower
+  styles.
 - **Hover:** every limit at once, as **usage** percentages.
 - **Click:** popover with one row per limit — title, reset time, usage
   percentage, progress bar — plus Refresh and Quit. Refresh shows a spinner and
@@ -320,9 +322,16 @@ Nothing is hard-coded to one account — no UUIDs, no tokens, no paths outside
   `autosaveName`), quit a menu bar app or two, or install
   [Ice](https://github.com/jordanbaird/Ice).
 
-  The widget defaults to its narrowest style, ~26pt of text with no icon, to
-  make itself easy to fit. `defaults write com.haicreative.claudeusagebar
-  MenuBarStyle gauge` restores the battery, `icon` gives the battery alone.
+  Or make the widget itself narrower. It shows the battery plus the percentage
+  by default, about 55pt:
+
+  ```
+  defaults write com.haicreative.claudeusagebar MenuBarStyle compact   # ~26pt, number only
+  defaults write com.haicreative.claudeusagebar MenuBarStyle icon      # ~29pt, battery only
+  defaults write com.haicreative.claudeusagebar MenuBarStyle gauge     # ~55pt, the default
+  ```
+
+  Quit and relaunch the app after changing it.
 - **Undocumented endpoint.** See above.
 - **Shares a credential with Claude Code.** Renewal writes to the same keychain
   item Claude Code reads, so a bad write would sign you out of Claude Code, not
