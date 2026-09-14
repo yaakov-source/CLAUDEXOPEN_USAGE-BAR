@@ -1294,6 +1294,26 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
     return shared;
 }
 
+/// Renewal gets its own session, because the patient one is wrong for it.
+/// Waiting out a sleeping network is right for a background usage poll that
+/// nobody is watching; a renewal happens with the spinner running and the
+/// Refresh button disabled, so a five-minute wait reads as a hung app. This one
+/// fails fast and lets the retry handle it.
+- (NSURLSession *)quickSession {
+    static NSURLSession *quick = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *config =
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        config.waitsForConnectivity        = NO;
+        config.timeoutIntervalForRequest   = 15;
+        config.timeoutIntervalForResource  = 30;
+        config.HTTPShouldUsePipelining     = NO;
+        quick = [NSURLSession sessionWithConfiguration:config];
+    });
+    return quick;
+}
+
 /// Transient plumbing — asleep, offline, wifi mid-handover, a TLS handshake
 /// that lost its connection. Not the server's answer and not the user's
 /// problem, so these never produce an alarming note: the numbers stay put and
@@ -1563,14 +1583,14 @@ static BOOL IsTransientNetworkError(NSError *error) {
                            NSHTTPURLResponse *http))done {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
     req.HTTPMethod = @"POST";
-    req.timeoutInterval = 30;
+    req.timeoutInterval = 15;
     req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"ClaudeUsageBar/1.0" forHTTPHeaderField:@"User-Agent"];
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
 
     NSURLSessionDataTask *task =
-        [[self session] dataTaskWithRequest:req
+        [[self quickSession] dataTaskWithRequest:req
                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]]
                                 ? (NSHTTPURLResponse *)response : nil;
@@ -1592,6 +1612,12 @@ static BOOL IsTransientNetworkError(NSError *error) {
 /// this session, and Claude Code renews its own copy the next time it runs.
 - (void)renewCredentials:(Credentials *)creds
                     then:(void (^)(Credentials *fresh, NSString *failure, BOOL transient))done {
+    [self renewCredentials:creds attempt:1 then:done];
+}
+
+- (void)renewCredentials:(Credentials *)creds
+                 attempt:(NSInteger)attempt
+                    then:(void (^)(Credentials *fresh, NSString *failure, BOOL transient))done {
     NSDictionary *body = @{ @"grant_type":    @"refresh_token",
                             @"refresh_token": creds.refreshToken,
                             @"client_id":     kClientID,
@@ -1604,8 +1630,21 @@ static BOOL IsTransientNetworkError(NSError *error) {
         if (!strong) return;
 
         if (error) {
-            LogFailure(0, http, nil, [@"renew: " stringByAppendingString:error.localizedDescription]);
-            done(nil, error.localizedDescription, IsTransientNetworkError(error));
+            BOOL transient = IsTransientNetworkError(error);
+            // One quick retry before giving up. A renewal is the only thing
+            // between the widget and a dead token, and the next scheduled
+            // attempt is 15 minutes away — too long to lose to one blip.
+            if (transient && attempt < 2) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    AppDelegate *again = weakSelf;
+                    if (again) [again renewCredentials:creds attempt:attempt + 1 then:done];
+                });
+                return;
+            }
+            LogFailure(0, http, nil, [NSString stringWithFormat:@"renew (attempt %ld): %@",
+                                      (long)attempt, error.localizedDescription]);
+            done(nil, error.localizedDescription, transient);
             return;
         }
         if (code == 429 || code >= 500) {
@@ -1652,6 +1691,12 @@ static BOOL IsTransientNetworkError(NSError *error) {
             if (werr) LogFailure(0, nil, nil, [@"renew: file write failed: "
                                                stringByAppendingString:werr.localizedDescription]);
         }
+        // Log the success too. Without it the log only ever shows renewals that
+        // failed, which makes a working feature look like a broken one and
+        // leaves no way to tell whether self-renewal ran at all.
+        LogFailure(200, http, nil,
+                   [NSString stringWithFormat:@"renew ok (attempt %ld, next expiry in %.1f h)",
+                    (long)attempt, [fresh.expires timeIntervalSinceNow] / 3600.0]);
         done(fresh, nil, NO);
     }];
 }
