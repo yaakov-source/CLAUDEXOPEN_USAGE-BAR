@@ -90,7 +90,7 @@ codesign --force --sign - "/Applications/ClaudeUsageBar.app" >/dev/null 2>&1 || 
 open "/Applications/ClaudeUsageBar.app"
 
 echo
-echo "Running AI Usage. Two gauges show ChatGPT and Claude; one number combines them."
+echo "Running AI Usage. One purple battery combines ChatGPT and Claude usage."
 echo
 echo "ChatGPT usage is read through Codex; Claude usage is read from Claude Code."
 echo "macOS may ask once for Keychain access to Claude Code — click 'Always Allow'."

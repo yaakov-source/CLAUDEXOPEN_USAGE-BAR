@@ -65,40 +65,6 @@ static long RemainingPercent(LimitInfo *limit) {
     return (long)lround(RemainingFraction(limit) * 100);
 }
 
-/// How much menu bar to occupy.
-///
-///   gauge    battery + number, ~55pt  (default)
-///   compact  just the number, ~26pt
-///   icon     battery only, ~29pt
-///
-/// Change with: defaults write com.haicreative.claudeusagebar MenuBarStyle compact
-///
-/// The battery is the default because it is the thing people install this for,
-/// and a fresh clone has to look right without anyone running `defaults write`.
-/// `compact` exists for the real failure it was written for: on a notched Mac
-/// with a crowded bar, macOS silently drops whatever doesn't fit, so width can
-/// be the difference between the widget existing and the widget being visible.
-/// It was briefly the default, which meant every new user got a bare percentage
-/// and no way to know the battery was there at all.
-static NSString *MenuBarStyle(void) {
-    NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:@"MenuBarStyle"];
-    if ([style isEqualToString:@"compact"] || [style isEqualToString:@"icon"]) return style;
-    return @"gauge";
-}
-
-/// Solid colour for the compact style, which has no bar to carry the gradient.
-/// Normal reads as ordinary menu bar text on purpose — colour should mean
-/// "look at me", so it should be absent until there is something to look at.
-static NSColor *TextColorForLimit(LimitInfo *limit) {
-    if ([limit.severity isEqualToString:@"critical"] || limit.fraction >= 0.90) {
-        return [NSColor systemRedColor];
-    }
-    if ([limit.severity isEqualToString:@"warning"] || limit.fraction >= 0.75) {
-        return [NSColor systemOrangeColor];
-    }
-    return [NSColor labelColor];
-}
-
 /// Which limit the menu bar speaks for. The 5-hour window is the one that
 /// actually stops you working, so it wins outright. If the server ever stops
 /// sending a session limit, fall back to whichever is closest to its cap.
@@ -771,49 +737,6 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
         NSRectFill(NSMakeRect(NSMidX(body) - 3, h / 2 - 0.5, 6, 1));
     }
 
-    [image unlockFocus];
-    image.template = NO;
-    return image;
-}
-
-static void DrawMiniGauge(NSRect frame, LimitInfo *limit) {
-    NSColor *outline = [[NSColor labelColor] colorWithAlphaComponent:0.55];
-    NSRect body = NSMakeRect(frame.origin.x + 0.5, frame.origin.y + 1.5,
-                             frame.size.width - 3.5, frame.size.height - 3);
-    NSBezierPath *bodyPath = [NSBezierPath bezierPathWithRoundedRect:body xRadius:2.5 yRadius:2.5];
-    bodyPath.lineWidth = 1;
-    [outline setStroke];
-    [bodyPath stroke];
-
-    NSRect capRect = NSMakeRect(NSMaxX(body) + 0.7, NSMidY(body) - 1.7, 1.8, 3.4);
-    NSBezierPath *cap = [NSBezierPath bezierPathWithRoundedRect:capRect xRadius:0.8 yRadius:0.8];
-    [outline setFill];
-    [cap fill];
-
-    if (!limit) {
-        [outline setFill];
-        NSRectFill(NSMakeRect(NSMidX(body) - 2, NSMidY(body) - 0.5, 4, 1));
-        return;
-    }
-
-    NSRect inner = NSInsetRect(body, 1.8, 1.8);
-    CGFloat width = RemainingFraction(limit) * inner.size.width;
-    if (width > 0.6) {
-        NSBezierPath *fill = [NSBezierPath bezierPathWithRoundedRect:
-                              NSMakeRect(NSMinX(inner), NSMinY(inner), width, inner.size.height)
-                                                             xRadius:1.2 yRadius:1.2];
-        [GradientForLimit(limit) drawInBezierPath:fill angle:0];
-    }
-}
-
-/// ChatGPT first, Claude second. Colour and the tooltip make the order clear;
-/// each cell is the remaining portion of that provider's five-hour window.
-static NSImage *CompositeGaugeImage(LimitInfo *chatGPT, LimitInfo *claude) {
-    CGFloat w = 39, h = 13;
-    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(w, h)];
-    [image lockFocus];
-    DrawMiniGauge(NSMakeRect(0, 0, 18, h), chatGPT);
-    DrawMiniGauge(NSMakeRect(21, 0, 18, h), claude);
     [image unlockFocus];
     image.template = NO;
     return image;
@@ -1594,7 +1517,7 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
     _statusItem.autosaveName = @"ClaudeUsageBar";
     _statusItem.button.imagePosition = NSImageLeading;
     _statusItem.button.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
-    [self applyButton:GaugeImage(nil, nil) title:@"—" tone:[NSColor labelColor]];
+    [self applyButton:GaugeImage(nil, nil) title:@"" tone:nil];
     _statusItem.button.target = self;
     _statusItem.button.action = @selector(togglePopover);
 
@@ -1632,9 +1555,8 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
 
         BOOL placed = NSWidth(frame) > 0 &&
                       NSMinX(frame) >= 0 && NSMaxX(frame) <= NSWidth(screen);
-        NSLog(@"AIUsageBar: status item x=%.0f-%.0f (width %.0f), screen %.0f, %@, "
-              @"style=%@ — %@", NSMinX(frame), NSMaxX(frame), NSWidth(frame),
-              NSWidth(screen), notch, MenuBarStyle(),
+        NSLog(@"AIUsageBar: status item x=%.0f-%.0f (width %.0f), screen %.0f, %@ — %@",
+              NSMinX(frame), NSMaxX(frame), NSWidth(frame), NSWidth(screen), notch,
               placed ? @"has a slot" : @"NO SLOT (menu bar is full)");
     });
 
@@ -2372,29 +2294,14 @@ static BOOL IsTransientNetworkError(NSError *error) {
 
 #pragma mark Rendering
 
-/// Applies the current MenuBarStyle. The status item's width is the sum of what
-/// we put in it, and on a full menu bar that width decides whether macOS shows
-/// the item at all.
-- (void)applyButton:(NSImage *)image title:(NSString *)title tone:(NSColor *)tone {
+/// The menu bar is intentionally icon-only: one battery, no percentage text.
+- (void)applyButton:(NSImage *)image
+              title:(__unused NSString *)title
+               tone:(__unused NSColor *)tone {
     NSStatusBarButton *button = _statusItem.button;
     if (!button) return;
-
-    NSString *style = MenuBarStyle();
-    if ([style isEqualToString:@"icon"]) {
-        button.image = image;
-        button.attributedTitle = [[NSAttributedString alloc] initWithString:@""];
-        return;
-    }
-
-    BOOL compact = [style isEqualToString:@"compact"];
-    button.image = compact ? nil : image;
-
-    NSString *text = compact ? title : [@" " stringByAppendingString:title];
-    button.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
-        NSForegroundColorAttributeName: tone ?: [NSColor labelColor],
-        NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:12
-                                                              weight:NSFontWeightRegular],
-    }];
+    button.image = image;
+    button.attributedTitle = [[NSAttributedString alloc] initWithString:@""];
 }
 
 - (void)renderState:(UsageState)state
@@ -2443,21 +2350,24 @@ static BOOL IsTransientNetworkError(NSError *error) {
                       ? MenuBarLimit(_lastLimits) : nil;
 
     if (chatGPT || claude) {
-        long combinedRemaining;
+        double combinedRemainingFraction;
         if (chatGPT && claude) {
-            combinedRemaining = (long)lround(
-                (RemainingFraction(chatGPT) + RemainingFraction(claude)) * 50.0);
+            combinedRemainingFraction =
+                (RemainingFraction(chatGPT) + RemainingFraction(claude)) / 2.0;
         } else if (chatGPT) {
-            combinedRemaining = RemainingPercent(chatGPT);
+            combinedRemainingFraction = RemainingFraction(chatGPT);
         } else {
-            combinedRemaining = RemainingPercent(claude);
+            combinedRemainingFraction = RemainingFraction(claude);
         }
-        NSString *title = [NSString stringWithFormat:@"%ld%%", combinedRemaining];
+        long combinedRemaining = (long)lround(combinedRemainingFraction * 100.0);
 
         LimitInfo *worst = (!claude || (chatGPT && chatGPT.fraction >= claude.fraction))
                          ? chatGPT : claude;
-        [self applyButton:CompositeGaugeImage(chatGPT, claude)
-                    title:title tone:TextColorForLimit(worst)];
+        LimitInfo *composite = [[LimitInfo alloc] init];
+        composite.fraction = worst.fraction;
+        composite.severity = worst.severity;
+        [self applyButton:GaugeImage(@(combinedRemainingFraction), GradientForLimit(composite))
+                    title:@"" tone:nil];
 
         NSMutableArray<NSString *> *lines = [NSMutableArray array];
         [lines addObject:[NSString stringWithFormat:@"AI Usage · combined 5-hour remaining: %ld%%\n"
@@ -2486,10 +2396,7 @@ static BOOL IsTransientNetworkError(NSError *error) {
     }
 
     BOOL loading = _claudeState == UsageStateLoading || _chatGPTState == UsageStateLoading;
-    BOOL expired = _claudeState == UsageStateExpired || _chatGPTState == UsageStateExpired;
-    [self applyButton:CompositeGaugeImage(nil, nil)
-                title:(loading ? @"…" : (expired ? @"!" : @"—"))
-                 tone:(expired ? [NSColor systemRedColor] : [NSColor labelColor])];
+    [self applyButton:GaugeImage(nil, nil) title:@"" tone:nil];
     button.toolTip = loading ? @"Loading AI usage…" : @"AI usage unavailable — click for details";
 }
 

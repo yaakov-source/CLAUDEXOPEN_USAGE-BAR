@@ -5,7 +5,7 @@ The menu bar combines both five-hour balances; click it for every returned
 limit, reset time, plan name, and usage percentage.
 
 ```
-[▓▓░] [▓▓▓] 37%         ← average five-hour remaining
+[▓▓░]                         ← combined five-hour remaining
 
 AI Usage
 ChatGPT · Plus
@@ -28,9 +28,9 @@ without the explanations.
 
 ## What it does
 
-- **Menu bar:** two battery cells showing ChatGPT/Codex and Claude five-hour
-  balances, followed by one **combined remaining** percentage (their average).
-  ChatGPT is green, Claude is coral; either turns orange/red near its cap.
+- **Menu bar:** one icon-only battery showing the average remaining across the
+  ChatGPT/Codex and Claude five-hour balances. Its normal fill is the original
+  purple, changing to orange/red only as a provider approaches its cap.
 - **Hover:** every limit at once, as **usage** percentages.
 - **Click:** separate ChatGPT and Claude sections with plan name, every limit,
   reset timing, usage percentage, and progress bar, plus Refresh and Quit.

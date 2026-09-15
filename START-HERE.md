@@ -102,9 +102,9 @@ A Keychain permission box appears. Click **Always Allow**.
 
 ## Step 5 — Look at your menu bar
 
-You should see two small battery outlines followed by one percentage at the top
-right. The batteries are ChatGPT/Codex then Claude; the number is their average
-five-hour remaining balance. Click it for full details from both services.
+You should see one small purple battery outline at the top right, with no text
+beside it. Its fill is the average five-hour remaining balance across ChatGPT
+and Claude. Click it for full details from both services.
 
 **Don't see it?** Your menu bar is probably full — macOS silently drops icons
 that don't fit, especially on MacBook Pros with a notch. Quit two or three
