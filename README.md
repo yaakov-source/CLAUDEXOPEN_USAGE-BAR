@@ -1,13 +1,18 @@
-# Claude Usage Widget
+# AI Usage
 
-A macOS menu bar gauge for Claude plan usage. Battery-style meter in the menu
-bar; click for a popover with a progress bar per limit — the same three rows the
-Claude desktop app shows under **Plan usage limits**.
+A macOS menu bar gauge for both **ChatGPT/Codex** and **Claude** plan usage.
+The menu bar combines both five-hour balances; click it for every returned
+limit, reset time, plan name, and usage percentage.
 
 ```
-▓▓▓▓▓░░░░ 55%          ← menu bar
+[▓▓░] [▓▓▓] 37%         ← average five-hour remaining
 
-Plan usage limits · Max (20x)
+AI Usage
+ChatGPT · Plus
+5-hour limit           Resets in 2 hr 14 min   80%
+Weekly limit           Resets Mon 3:00 AM      12%
+
+Claude · Max (20x)
 5-hour limit           Resets in 1 hr 10 min    0%
 ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 Weekly · all models    Resets Mon 3:00 AM      55%
@@ -23,17 +28,12 @@ without the explanations.
 
 ## What it does
 
-- **Menu bar:** a battery outline tracking the **5-hour limit**, showing how
-  much is **left** — 100% on an untouched plan, draining as you work. That is
-  the one limit that actually stops you working, and a battery reading 0% when
-  nothing has been used looks broken. Purple under 75% used, orange at 75%, red
-  at 90% — or whatever `severity` the API reports, if that's more severe. If
-  your menu bar is too full to fit it, see *Known limitations* for narrower
-  styles.
+- **Menu bar:** two battery cells showing ChatGPT/Codex and Claude five-hour
+  balances, followed by one **combined remaining** percentage (their average).
+  ChatGPT is green, Claude is coral; either turns orange/red near its cap.
 - **Hover:** every limit at once, as **usage** percentages.
-- **Click:** popover with one row per limit — title, reset time, usage
-  percentage, progress bar — plus Refresh and Quit. Refresh shows a spinner and
-  reads "Refreshing…" while a fetch is in flight.
+- **Click:** separate ChatGPT and Claude sections with plan name, every limit,
+  reset timing, usage percentage, and progress bar, plus Refresh and Quit.
 
 Only the menu bar inverts to remaining. The popover and tooltip stay phrased as
 usage, matching the desktop app's own panel, so the two never disagree about
@@ -48,11 +48,13 @@ what a number means — they just answer different questions.
 |---|---|
 | macOS | 12 or later |
 | Xcode Command Line Tools | `xcode-select --install` |
+| Codex CLI | Install Codex and run `codex login` with the ChatGPT account whose limits you want to see |
 | Claude Code CLI | `npm install -g @anthropic-ai/claude-code`, then `claude` and sign in once — choose **1. Claude account with subscription**, not the Console/API option |
+| ChatGPT plan | Any plan that exposes Codex usage limits |
 | Claude plan | Any plan with usage limits (Pro, Max 5x, Max 20x). A Console/API login has no plan limits, so the widget has nothing to show |
 
-Sign in once and you're done: the widget renews the token itself when it
-expires, the same way Claude Code does. See *Token expiry and renewal* below.
+Sign in once to each CLI. Codex owns the ChatGPT session; AI Usage renews the
+Claude token the same way Claude Code does. See *Token expiry and renewal* below.
 
 ## Install
 
@@ -60,9 +62,9 @@ expires, the same way Claude Code does. See *Token expiry and renewal* below.
 ./build.sh
 ```
 
-Compiles `main.m`, assembles `ClaudeUsageBar.app`, ad-hoc signs it, copies it to
-`/Applications`, and launches it. Use `./build.sh --no-install` to build into
-`./build` without touching `/Applications`.
+Compiles `main.m`, assembles the **AI Usage** app, ad-hoc signs it, copies it to
+`/Applications/ClaudeUsageBar.app` (the compatibility path used by existing
+login items), and launches it. Use `./build.sh --no-install` to build only.
 
 Start at login:
 
@@ -82,7 +84,16 @@ osascript -e 'tell application "System Events" to delete login item "ClaudeUsage
 
 ## How it works
 
-### Where the numbers come from
+### Where the ChatGPT numbers come from
+
+AI Usage starts the installed `codex app-server` locally and reads its
+`account/rateLimits/read` response. Codex owns authentication and token refresh;
+AI Usage never reads or writes `~/.codex/auth.json`. The response provides the
+plan type, all available rate-limit buckets, used percentages, window durations,
+and reset timestamps. A 300-minute primary window is shown as **5-hour limit**
+and a 10,080-minute secondary window as **Weekly limit**.
+
+### Where the Claude numbers come from
 
 ```
 GET https://api.anthropic.com/api/oauth/usage

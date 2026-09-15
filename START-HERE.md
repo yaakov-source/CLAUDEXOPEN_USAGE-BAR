@@ -1,9 +1,9 @@
 # Start Here
 
-Plain-English setup. Works on any Mac. Takes about ten minutes the first time,
-about thirty seconds every time after that.
+Plain-English setup for **AI Usage**. Works on any Mac and shows both ChatGPT
+and Claude plan limits from their command-line sign-ins.
 
-You'll be copying and pasting four commands into an app called Terminal. You
+You'll be copying and pasting a few commands into an app called Terminal. You
 don't need to understand them.
 
 ---
@@ -33,7 +33,21 @@ If it says *"command line tools are already installed"*, you're fine — move on
 
 ---
 
-## Step 2 — Install Claude Code and sign in
+## Step 2 — Sign into ChatGPT through Codex
+
+If Codex is already installed and signed in on this Mac, skip this step.
+Otherwise install Codex, then run:
+
+```
+codex login
+```
+
+Complete the ChatGPT sign-in in the browser. AI Usage asks Codex for your
+five-hour and weekly limits; it never reads or changes Codex's token file.
+
+---
+
+## Step 3 — Install Claude Code and sign in
 
 ```
 npm install -g @anthropic-ai/claude-code
@@ -71,7 +85,7 @@ way. You should never have to open `claude` for the widget again.
 
 ---
 
-## Step 3 — Build and install the widget
+## Step 4 — Build and install AI Usage
 
 ```
 cd ~/Downloads/claude-usage-widget && ./build.sh
@@ -86,10 +100,11 @@ A Keychain permission box appears. Click **Always Allow**.
 
 ---
 
-## Step 4 — Look at your menu bar
+## Step 5 — Look at your menu bar
 
-You should see a small battery outline with a percentage next to it, at the top
-right of your screen. Click it.
+You should see two small battery outlines followed by one percentage at the top
+right. The batteries are ChatGPT/Codex then Claude; the number is their average
+five-hour remaining balance. Click it for full details from both services.
 
 **Don't see it?** Your menu bar is probably full — macOS silently drops icons
 that don't fit, especially on MacBook Pros with a notch. Quit two or three
@@ -110,8 +125,8 @@ osascript -e 'tell application "System Events" to make login item at end with pr
 
 ## If it stops working
 
-Most of the time it won't. Your sign-in key runs out every 8 hours or so, and
-the widget renews it on its own.
+Most of the time it won't. Codex maintains the ChatGPT sign-in, and AI Usage
+renews the Claude sign-in when it expires.
 
 **The icon shows `!`** — the key couldn't be renewed, usually because you
 signed out of Claude Code. Click the widget, then click **Open Terminal and
@@ -119,7 +134,8 @@ run claude**. Sign in (option 1 again), type `/exit`, and the widget picks it
 up by itself within a few minutes.
 
 **The icon shows `—`** — click it; the popover explains what's wrong. If it
-says *No Claude token found*, do Step 2 again.
+says *No Claude token found*, do Step 3 again. If the ChatGPT section says it
+isn't signed in, run `codex login` again.
 
 **It says "Offline"** — your Mac lost its connection. It keeps showing the last
 numbers and retries when you're back online. Nothing to do.

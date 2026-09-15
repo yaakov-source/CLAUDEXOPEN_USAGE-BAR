@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds ClaudeUsageBar.app and installs it to /Applications.
+# Builds AI Usage and installs it to /Applications.
 #
 #   ./build.sh            build + install + launch
 #   ./build.sh --no-install   build into ./build only
@@ -25,19 +25,19 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>ClaudeUsageBar</string>
+	<string>AIUsageBar</string>
 	<key>CFBundleDisplayName</key>
-	<string>Claude Usage</string>
+	<string>AI Usage</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.haicreative.claudeusagebar</string>
 	<key>CFBundleExecutable</key>
-	<string>ClaudeUsageBar</string>
+	<string>AIUsageBar</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>2.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>LSUIElement</key>
@@ -52,10 +52,18 @@ PLIST
 # swiftinterface/compiler version check that stock Command Line Tools trip on.
 clang -O2 -fobjc-arc -Wall \
   -mmacosx-version-min=12.0 \
-  -o "$APP/Contents/MacOS/ClaudeUsageBar" \
+  -o "$APP/Contents/MacOS/AIUsageBar" \
   "$DIR/main.m" \
   -framework Cocoa
 
+# Cloud-synced folders can attach Finder/File Provider metadata to the fresh
+# bundle. Those attributes are not executable content and make codesign refuse
+# the bundle, so strip them before applying the ad-hoc signature. The two root
+# attributes need explicit removal on File Provider volumes before the recursive
+# pass can clear the ordinary provenance attributes.
+xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
+xattr -cr "$APP" 2>/dev/null || true
 codesign --force --sign - "$APP" >/dev/null 2>&1 || \
   echo "(ad-hoc signing skipped — app will still run)"
 
@@ -66,18 +74,26 @@ if [ "${1:-}" = "--no-install" ]; then
 fi
 
 echo "Installing to /Applications..."
-pkill -f "ClaudeUsageBar" 2>/dev/null || true
+pkill -f "ClaudeUsageBar|AIUsageBar" 2>/dev/null || true
 sleep 1
 rm -rf "/Applications/ClaudeUsageBar.app"
 cp -R "$APP" "/Applications/ClaudeUsageBar.app"
 
+# Finder can add its own metadata while copying into /Applications, invalidating
+# the otherwise valid ad-hoc signature. Clear and sign the installed copy too.
+xattr -d com.apple.FinderInfo "/Applications/ClaudeUsageBar.app" 2>/dev/null || true
+xattr -d 'com.apple.fileprovider.fpfs#P' "/Applications/ClaudeUsageBar.app" 2>/dev/null || true
+xattr -cr "/Applications/ClaudeUsageBar.app" 2>/dev/null || true
+codesign --force --sign - "/Applications/ClaudeUsageBar.app" >/dev/null 2>&1 || \
+  echo "(installed app signing skipped — app will still run)"
+
 open "/Applications/ClaudeUsageBar.app"
 
 echo
-echo "Running. Look for the battery-style gauge in your menu bar."
+echo "Running AI Usage. Two gauges show ChatGPT and Claude; one number combines them."
 echo
-echo "macOS will ask once for permission to read the Claude Code token from your"
-echo "Keychain — click 'Always Allow'."
+echo "ChatGPT usage is read through Codex; Claude usage is read from Claude Code."
+echo "macOS may ask once for Keychain access to Claude Code — click 'Always Allow'."
 echo
 echo "To start it automatically at login:"
 echo "  osascript -e 'tell application \"System Events\" to make login item at end with properties {path:\"/Applications/ClaudeUsageBar.app\", hidden:true}'"

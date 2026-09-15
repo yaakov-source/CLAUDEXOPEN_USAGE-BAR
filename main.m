@@ -1,4 +1,4 @@
-// ClaudeUsageBar — a macOS menu bar gauge for Claude plan usage.
+// AI Usage — a macOS menu bar gauge for Claude and ChatGPT/Codex plan usage.
 //
 // Menu bar shows a battery-style meter for whichever limit is closest to its
 // cap. Click for a popover with one row per limit, mirroring the desktop app's
@@ -46,6 +46,7 @@ typedef NS_ENUM(NSInteger, UsageState) {
 @interface LimitInfo : NSObject
 @property (nonatomic, copy)   NSString *title;
 @property (nonatomic, copy)   NSString *kind;       // server's key: session, weekly_all, ...
+@property (nonatomic, copy)   NSString *provider;   // "claude" or "chatgpt"
 @property (nonatomic)         double    fraction;   // 0...1, the portion USED
 @property (nonatomic, strong) NSDate   *resets;
 @property (nonatomic, copy)   NSString *severity;
@@ -508,6 +509,7 @@ static NSArray<LimitInfo *> *ParseLimits(id root) {
             LimitInfo *limit = [[LimitInfo alloc] init];
             limit.title = title;
             limit.kind = kind;
+            limit.provider = @"claude";
             limit.fraction = MAX(0.0, MIN(1.0, [pct doubleValue] / 100.0));
             limit.resets = ParseDate(item[@"resets_at"]);
             limit.severity = [item[@"severity"] isKindOfClass:[NSString class]] ? item[@"severity"] : @"normal";
@@ -528,6 +530,7 @@ static NSArray<LimitInfo *> *ParseLimits(id root) {
         LimitInfo *limit = [[LimitInfo alloc] init];
         limit.title = pair[1];
         limit.kind = pair[2];
+        limit.provider = @"claude";
         limit.fraction = MAX(0.0, MIN(1.0, [pct doubleValue] / 100.0));
         limit.resets = ParseDate(((NSDictionary *)obj)[@"resets_at"]);
         limit.severity = @"normal";
@@ -587,6 +590,90 @@ static NSString *PrettyPlan(NSString *tier) {
     return [s capitalizedString];
 }
 
+static NSString *PrettyChatGPTPlan(NSString *plan) {
+    if (![plan isKindOfClass:[NSString class]] || plan.length == 0) return nil;
+    NSDictionary *names = @{
+        @"free": @"Free", @"go": @"Go", @"plus": @"Plus", @"pro": @"Pro",
+        @"prolite": @"Pro Lite", @"team": @"Team", @"business": @"Business",
+        @"enterprise": @"Enterprise", @"edu": @"Edu", @"edu_plus": @"Edu Plus",
+        @"edu_pro": @"Edu Pro"
+    };
+    NSString *known = names[plan];
+    if (known) return known;
+    return [[plan stringByReplacingOccurrencesOfString:@"_" withString:@" "] capitalizedString];
+}
+
+static NSString *WindowTitle(NSNumber *minutes, NSString *bucket, BOOL includeBucket) {
+    long mins = minutes ? [minutes longValue] : 0;
+    NSString *window;
+    if (mins == 300)          window = @"5-hour limit";
+    else if (mins == 10080)   window = @"Weekly limit";
+    else if (mins > 0 && mins % 1440 == 0)
+        window = [NSString stringWithFormat:@"%ld-day limit", mins / 1440];
+    else if (mins > 0 && mins % 60 == 0)
+        window = [NSString stringWithFormat:@"%ld-hour limit", mins / 60];
+    else if (mins > 0)
+        window = [NSString stringWithFormat:@"%ld-minute limit", mins];
+    else
+        window = @"Usage limit";
+
+    if (!includeBucket || bucket.length == 0 || [bucket isEqualToString:@"Codex"]) return window;
+    return [NSString stringWithFormat:@"%@ · %@", bucket, window];
+}
+
+/// Converts the public app-server protocol's account/rateLimits/read result
+/// into the same model the Claude UI already uses. Prefer the multi-bucket map
+/// when present, then fall back to its backward-compatible single bucket.
+static NSArray<LimitInfo *> *ParseChatGPTLimits(NSDictionary *result, NSString **planOut) {
+    if (![result isKindOfClass:[NSDictionary class]]) return @[];
+
+    NSDictionary *byID = [result[@"rateLimitsByLimitId"] isKindOfClass:[NSDictionary class]]
+                       ? result[@"rateLimitsByLimitId"] : nil;
+    NSMutableArray<NSDictionary *> *snapshots = [NSMutableArray array];
+    if (byID.count) {
+        for (NSString *key in [[byID allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+            id value = byID[key];
+            if ([value isKindOfClass:[NSDictionary class]]) [snapshots addObject:value];
+        }
+    } else if ([result[@"rateLimits"] isKindOfClass:[NSDictionary class]]) {
+        [snapshots addObject:result[@"rateLimits"]];
+    }
+
+    NSMutableArray<LimitInfo *> *limits = [NSMutableArray array];
+    BOOL includeBucket = snapshots.count > 1;
+    for (NSDictionary *snapshot in snapshots) {
+        NSString *rawPlan = [snapshot[@"planType"] isKindOfClass:[NSString class]]
+                          ? snapshot[@"planType"] : nil;
+        if (planOut && !*planOut && rawPlan.length) *planOut = PrettyChatGPTPlan(rawPlan);
+
+        NSString *bucket = [snapshot[@"limitName"] isKindOfClass:[NSString class]]
+                         ? snapshot[@"limitName"] : nil;
+        if (bucket.length == 0 && [snapshot[@"limitId"] isKindOfClass:[NSString class]]) {
+            bucket = [snapshot[@"limitId"] capitalizedString];
+        }
+
+        for (NSString *key in @[@"primary", @"secondary"]) {
+            NSDictionary *window = [snapshot[key] isKindOfClass:[NSDictionary class]]
+                                 ? snapshot[key] : nil;
+            NSNumber *used = Numeric(window[@"usedPercent"]);
+            if (!window || !used) continue;
+
+            NSNumber *mins = Numeric(window[@"windowDurationMins"]);
+            LimitInfo *limit = [[LimitInfo alloc] init];
+            limit.title = WindowTitle(mins, bucket, includeBucket);
+            limit.kind = ([mins longValue] == 300) ? @"session"
+                       : [NSString stringWithFormat:@"window_%ld", (long)[mins longValue]];
+            limit.provider = @"chatgpt";
+            limit.fraction = MAX(0.0, MIN(1.0, [used doubleValue] / 100.0));
+            limit.resets = ParseDate(window[@"resetsAt"]);
+            limit.severity = limit.fraction >= 0.90 ? @"critical"
+                           : limit.fraction >= 0.75 ? @"warning" : @"normal";
+            [limits addObject:limit];
+        }
+    }
+    return limits;
+}
+
 #pragma mark - Formatting
 
 static NSString *ResetText(NSDate *date) {
@@ -624,6 +711,15 @@ static NSGradient *PurpleGradient(void) {
     return g;
 }
 
+static NSGradient *ProviderGradient(LimitInfo *limit) {
+    if ([limit.provider isEqualToString:@"chatgpt"]) {
+        return [[NSGradient alloc] initWithStartingColor:RGB(0.12, 0.67, 0.52)
+                                             endingColor:RGB(0.05, 0.52, 0.40)];
+    }
+    return [[NSGradient alloc] initWithStartingColor:RGB(0.93, 0.49, 0.31)
+                                         endingColor:RGB(0.78, 0.32, 0.22)];
+}
+
 /// Purple normally; warmer once the limit is close enough to matter. The
 /// escalation is the whole point of the colour, so it survives the restyle.
 static NSGradient *GradientForLimit(LimitInfo *limit) {
@@ -638,7 +734,7 @@ static NSGradient *GradientForLimit(LimitInfo *limit) {
         return [[NSGradient alloc] initWithStartingColor:RGB(0.98, 0.62, 0.20)
                                              endingColor:RGB(0.99, 0.45, 0.22)];
     }
-    return PurpleGradient();
+    return limit.provider.length ? ProviderGradient(limit) : PurpleGradient();
 }
 
 #pragma mark - Menu bar gauge
@@ -680,6 +776,49 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
     return image;
 }
 
+static void DrawMiniGauge(NSRect frame, LimitInfo *limit) {
+    NSColor *outline = [[NSColor labelColor] colorWithAlphaComponent:0.55];
+    NSRect body = NSMakeRect(frame.origin.x + 0.5, frame.origin.y + 1.5,
+                             frame.size.width - 3.5, frame.size.height - 3);
+    NSBezierPath *bodyPath = [NSBezierPath bezierPathWithRoundedRect:body xRadius:2.5 yRadius:2.5];
+    bodyPath.lineWidth = 1;
+    [outline setStroke];
+    [bodyPath stroke];
+
+    NSRect capRect = NSMakeRect(NSMaxX(body) + 0.7, NSMidY(body) - 1.7, 1.8, 3.4);
+    NSBezierPath *cap = [NSBezierPath bezierPathWithRoundedRect:capRect xRadius:0.8 yRadius:0.8];
+    [outline setFill];
+    [cap fill];
+
+    if (!limit) {
+        [outline setFill];
+        NSRectFill(NSMakeRect(NSMidX(body) - 2, NSMidY(body) - 0.5, 4, 1));
+        return;
+    }
+
+    NSRect inner = NSInsetRect(body, 1.8, 1.8);
+    CGFloat width = RemainingFraction(limit) * inner.size.width;
+    if (width > 0.6) {
+        NSBezierPath *fill = [NSBezierPath bezierPathWithRoundedRect:
+                              NSMakeRect(NSMinX(inner), NSMinY(inner), width, inner.size.height)
+                                                             xRadius:1.2 yRadius:1.2];
+        [GradientForLimit(limit) drawInBezierPath:fill angle:0];
+    }
+}
+
+/// ChatGPT first, Claude second. Colour and the tooltip make the order clear;
+/// each cell is the remaining portion of that provider's five-hour window.
+static NSImage *CompositeGaugeImage(LimitInfo *chatGPT, LimitInfo *claude) {
+    CGFloat w = 39, h = 13;
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(w, h)];
+    [image lockFocus];
+    DrawMiniGauge(NSMakeRect(0, 0, 18, h), chatGPT);
+    DrawMiniGauge(NSMakeRect(21, 0, 18, h), claude);
+    [image unlockFocus];
+    image.template = NO;
+    return image;
+}
+
 #pragma mark - Bar view
 
 @interface BarView : NSView
@@ -709,13 +848,202 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
 
 @end
 
+#pragma mark - ChatGPT usage through the local Codex app server
+
+typedef void (^CodexUsageCompletion)(NSDictionary *result, NSString *failure);
+
+static NSString *CodexExecutablePath(void) {
+    NSArray<NSString *> *candidates = @[
+        @"/opt/homebrew/bin/codex",
+        @"/usr/local/bin/codex",
+        [@"~/.local/bin/codex" stringByExpandingTildeInPath],
+        [@"~/bin/codex" stringByExpandingTildeInPath],
+    ];
+    for (NSString *path in candidates) {
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
+    }
+    return nil;
+}
+
+/// A tiny JSON-lines client for `codex app-server`. Keeping authentication in
+/// Codex is deliberate: Codex refreshes its own ChatGPT token and exposes a
+/// stable account/rateLimits/read protocol, so this widget never needs to read,
+/// copy, log, or write ~/.codex/auth.json.
+@interface CodexUsageRequest : NSObject
+@property (nonatomic, strong) NSTask *task;
+@property (nonatomic, strong) NSPipe *input;
+@property (nonatomic, strong) NSPipe *output;
+@property (nonatomic, strong) NSPipe *errors;
+@property (nonatomic, strong) NSMutableData *buffer;
+@property (nonatomic, copy) CodexUsageCompletion completion;
+- (void)start:(CodexUsageCompletion)completion;
+- (void)cancel;
+@end
+
+@implementation CodexUsageRequest
+
+- (void)sendObject:(NSDictionary *)object {
+    NSData *json = [NSJSONSerialization dataWithJSONObject:object options:0 error:NULL];
+    if (!json || !self.input) return;
+    NSMutableData *line = [json mutableCopy];
+    const unsigned char newline = '\n';
+    [line appendBytes:&newline length:1];
+    @try {
+        [self.input.fileHandleForWriting writeData:line];
+    } @catch (__unused NSException *exception) {
+        [self finishWithResult:nil failure:@"Codex closed the usage connection."];
+    }
+}
+
+- (void)start:(CodexUsageCompletion)completion {
+    self.completion = completion;
+    self.buffer = [NSMutableData data];
+
+    NSString *path = CodexExecutablePath();
+    if (!path) {
+        [self finishWithResult:nil
+                       failure:@"Codex CLI not found. Install Codex and sign in to ChatGPT."];
+        return;
+    }
+
+    self.task = [[NSTask alloc] init];
+    self.task.executableURL = [NSURL fileURLWithPath:path];
+    self.task.arguments = @[@"app-server", @"--stdio"];
+    self.task.currentDirectoryURL = [NSURL fileURLWithPath:NSHomeDirectory()];
+
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    NSString *bin = [path stringByDeletingLastPathComponent];
+    NSString *oldPath = environment[@"PATH"] ?: @"/usr/bin:/bin:/usr/sbin:/sbin";
+    environment[@"PATH"] = [NSString stringWithFormat:@"%@:/opt/homebrew/bin:/usr/local/bin:%@",
+                              bin, oldPath];
+    self.task.environment = environment;
+
+    self.input = [NSPipe pipe];
+    self.output = [NSPipe pipe];
+    self.errors = [NSPipe pipe];
+    self.task.standardInput = self.input;
+    self.task.standardOutput = self.output;
+    self.task.standardError = self.errors;
+
+    __weak CodexUsageRequest *weakSelf = self;
+    self.output.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+        NSData *data = handle.availableData;
+        if (data.length == 0) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CodexUsageRequest *strong = weakSelf;
+            if (!strong || !strong.completion) return;
+            [strong.buffer appendData:data];
+            [strong consumeLines];
+        });
+    };
+    self.task.terminationHandler = ^(NSTask *task) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CodexUsageRequest *strong = weakSelf;
+            if (strong.completion) {
+                [strong finishWithResult:nil failure:[NSString stringWithFormat:
+                    @"Codex usage reader exited with status %d.", task.terminationStatus]];
+            }
+        });
+    };
+
+    NSError *launchError = nil;
+    if (![self.task launchAndReturnError:&launchError]) {
+        [self finishWithResult:nil failure:launchError.localizedDescription ?: @"Could not start Codex."];
+        return;
+    }
+
+    [self sendObject:@{
+        @"id": @1,
+        @"method": @"initialize",
+        @"params": @{
+            @"clientInfo": @{ @"name": @"ai-usage-bar", @"version": @"2.0" },
+            @"capabilities": @{ @"experimentalApi": @YES }
+        }
+    }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CodexUsageRequest *strong = weakSelf;
+        if (strong.completion) {
+            [strong finishWithResult:nil failure:@"ChatGPT usage request timed out."];
+        }
+    });
+}
+
+- (void)consumeLines {
+    static NSData *newline = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ const unsigned char b = '\n'; newline = [NSData dataWithBytes:&b length:1]; });
+
+    while (self.buffer.length) {
+        NSRange range = [self.buffer rangeOfData:newline options:0
+                                           range:NSMakeRange(0, self.buffer.length)];
+        if (range.location == NSNotFound) return;
+        NSData *line = [self.buffer subdataWithRange:NSMakeRange(0, range.location)];
+        [self.buffer replaceBytesInRange:NSMakeRange(0, NSMaxRange(range)) withBytes:NULL length:0];
+        if (line.length == 0) continue;
+
+        id parsed = [NSJSONSerialization JSONObjectWithData:line options:0 error:NULL];
+        if (![parsed isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *object = parsed;
+        NSNumber *requestID = Numeric(object[@"id"]);
+        if ([requestID integerValue] == 1) {
+            if (object[@"error"]) {
+                [self finishWithResult:nil failure:@"Codex could not initialize its usage reader."];
+                return;
+            }
+            [self sendObject:@{
+                @"id": @2,
+                @"method": @"account/rateLimits/read",
+                @"params": @{ @"includeResetCredits": @NO }
+            }];
+        } else if ([requestID integerValue] == 2) {
+            NSDictionary *result = [object[@"result"] isKindOfClass:[NSDictionary class]]
+                                   ? object[@"result"] : nil;
+            if (result) {
+                [self finishWithResult:result failure:nil];
+            } else {
+                NSDictionary *error = [object[@"error"] isKindOfClass:[NSDictionary class]]
+                                      ? object[@"error"] : nil;
+                NSString *message = [error[@"message"] isKindOfClass:[NSString class]]
+                                  ? error[@"message"] : @"ChatGPT usage is unavailable.";
+                [self finishWithResult:nil failure:message];
+            }
+            return;
+        }
+    }
+}
+
+- (void)finishWithResult:(NSDictionary *)result failure:(NSString *)failure {
+    CodexUsageCompletion completion = self.completion;
+    if (!completion) return;
+    self.completion = nil;
+    self.output.fileHandleForReading.readabilityHandler = nil;
+    @try { [self.input.fileHandleForWriting closeFile]; } @catch (__unused NSException *e) {}
+    if (self.task.running) [self.task terminate];
+    completion(result, failure);
+}
+
+- (void)cancel {
+    self.completion = nil;
+    self.output.fileHandleForReading.readabilityHandler = nil;
+    @try { [self.input.fileHandleForWriting closeFile]; } @catch (__unused NSException *e) {}
+    if (self.task.running) [self.task terminate];
+}
+
+@end
+
 #pragma mark - Popover controller
 
 @interface UsageViewController : NSViewController
-@property (nonatomic)         UsageState        state;
-@property (nonatomic, strong) NSArray<LimitInfo *> *limits;
-@property (nonatomic, copy)   NSString         *plan;
-@property (nonatomic, copy)   NSString         *message;
+@property (nonatomic)         UsageState        claudeState;
+@property (nonatomic, strong) NSArray<LimitInfo *> *claudeLimits;
+@property (nonatomic, copy)   NSString         *claudePlan;
+@property (nonatomic, copy)   NSString         *claudeMessage;
+@property (nonatomic)         UsageState        chatGPTState;
+@property (nonatomic, strong) NSArray<LimitInfo *> *chatGPTLimits;
+@property (nonatomic, copy)   NSString         *chatGPTPlan;
+@property (nonatomic, copy)   NSString         *chatGPTMessage;
 @property (nonatomic, copy)   void (^onRefresh)(void);
 @property (nonatomic)         BOOL              busy;
 - (void)refreshUI;
@@ -733,8 +1061,10 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _width = 380;
-        _state = UsageStateLoading;
-        _limits = @[];
+        _claudeState = UsageStateLoading;
+        _claudeLimits = @[];
+        _chatGPTState = UsageStateLoading;
+        _chatGPTLimits = @[];
     }
     return self;
 }
@@ -851,12 +1181,16 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
 /// One click instead of a remembered command. The widget cannot renew the
 /// token itself — see the README on why refreshing it here could invalidate the
 /// user's CLI login — but it can start the thing that does.
-- (NSView *)fixItButton {
+- (NSView *)fixItButtonForProvider:(NSString *)provider {
     NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSButton *fix = [NSButton buttonWithTitle:@"Open Terminal and run claude"
-                                       target:self action:@selector(runClaudeTapped)];
+    BOOL chatGPT = [provider isEqualToString:@"chatgpt"];
+    NSButton *fix = [NSButton buttonWithTitle:(chatGPT
+                          ? @"Open Terminal and run codex login"
+                          : @"Open Terminal and run claude")
+                                       target:self action:(chatGPT
+                          ? @selector(runCodexTapped) : @selector(runClaudeTapped))];
     fix.bezelStyle  = NSBezelStyleRounded;
     fix.controlSize = NSControlSizeSmall;
     fix.font        = [NSFont systemFontOfSize:11];
@@ -870,6 +1204,25 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
         [fix.trailingAnchor constraintLessThanOrEqualToAnchor:row.trailingAnchor],
     ]];
     return row;
+}
+
+- (void)runCodexTapped {
+    NSString *script = @"tell application \"Terminal\"\n"
+                        "activate\n"
+                        "do script \"codex login\"\n"
+                        "end tell";
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    task.arguments = @[@"-e", script];
+    [task launchAndReturnError:NULL];
+    if (self.onRefresh) {
+        __weak UsageViewController *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UsageViewController *strong = weakSelf;
+            if (strong.onRefresh) strong.onRefresh();
+        });
+    }
 }
 
 - (void)runClaudeTapped {
@@ -945,6 +1298,52 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
     [[row.widthAnchor constraintEqualToAnchor:_stack.widthAnchor] setActive:YES];
 }
 
+- (void)addProviderNamed:(NSString *)name
+                    plan:(NSString *)plan
+                   state:(UsageState)state
+                  limits:(NSArray<LimitInfo *> *)limits
+                 message:(NSString *)message
+                provider:(NSString *)provider {
+    NSString *heading = plan.length ? [NSString stringWithFormat:@"%@ · %@", name, plan] : name;
+    [self addRow:[self labelWithText:heading size:14 bold:YES
+                                tone:[NSColor labelColor]
+                               align:NSTextAlignmentLeft]];
+
+    switch (state) {
+        case UsageStateLoading:
+            [self addRow:[self messageBlock:@"Loading…"]];
+            break;
+        case UsageStateNoCredentials:
+            [self addRow:[self messageBlock:[provider isEqualToString:@"chatgpt"]
+                ? @"No ChatGPT sign-in found. Run `codex login` in Terminal, then refresh."
+                : @"No Claude token found. Run `claude` in Terminal and sign in, then refresh."]];
+            [self addRow:[self fixItButtonForProvider:provider]];
+            break;
+        case UsageStateExpired:
+            if ([provider isEqualToString:@"chatgpt"]) {
+                [self addRow:[self messageBlock:(message.length
+                    ? [NSString stringWithFormat:@"ChatGPT sign-in needs attention (%@).", message]
+                    : @"ChatGPT sign-in needs attention.")]];
+            } else {
+                [self addRow:[self messageBlock:(message.length
+                    ? [NSString stringWithFormat:
+                       @"Sign-in expired and couldn't be renewed automatically (%@). "
+                        "Signing in again fixes it.", message]
+                    : @"Sign-in expired and couldn't be renewed automatically. "
+                       "Signing in again fixes it.")]];
+            }
+            [self addRow:[self fixItButtonForProvider:provider]];
+            break;
+        case UsageStateError:
+            [self addRow:[self messageBlock:(message ?: @"Usage is unavailable.")]];
+            break;
+        case UsageStateOK:
+            for (LimitInfo *limit in limits) [self addRow:[self limitBlock:limit]];
+            if (message.length) [self addRow:[self messageBlock:message]];
+            break;
+    }
+}
+
 - (void)refreshUI {
     // Touching self.view loads it, and viewDidLoad calls straight back here
     // with the stack in place. Without this the first render built everything
@@ -956,45 +1355,13 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
         [v removeFromSuperview];
     }
 
-    NSString *headerText = @"Claude usage";
-    if (self.state == UsageStateOK) {
-        headerText = self.plan.length
-            ? [NSString stringWithFormat:@"Plan usage limits · %@", self.plan]
-            : @"Plan usage limits";
-    }
-    [self addRow:[self labelWithText:headerText size:12 bold:NO
+    [self addRow:[self labelWithText:@"AI Usage" size:12 bold:NO
                                 tone:[NSColor secondaryLabelColor]
                                align:NSTextAlignmentLeft]];
-
-    switch (self.state) {
-        case UsageStateLoading:
-            [self addRow:[self messageBlock:@"Loading…"]];
-            break;
-        case UsageStateNoCredentials:
-            [self addRow:[self messageBlock:
-                @"No Claude token found.\nRun `claude` in Terminal and sign in, then refresh."]];
-            break;
-        case UsageStateExpired:
-            [self addRow:[self messageBlock:(self.message.length
-                ? [NSString stringWithFormat:
-                   @"Sign-in expired and couldn't be renewed automatically (%@). "
-                    "Signing in again fixes it.", self.message]
-                : @"Sign-in expired and couldn't be renewed automatically. "
-                   "Signing in again fixes it.")]];
-            [self addRow:[self fixItButton]];
-            break;
-        case UsageStateError:
-            [self addRow:[self messageBlock:(self.message ?: @"Something went wrong.")]];
-            break;
-        case UsageStateOK:
-            for (LimitInfo *limit in self.limits) {
-                [self addRow:[self limitBlock:limit]];
-            }
-            if (self.message.length) {
-                [self addRow:[self messageBlock:self.message]];
-            }
-            break;
-    }
+    [self addProviderNamed:@"ChatGPT" plan:self.chatGPTPlan state:self.chatGPTState
+                    limits:self.chatGPTLimits message:self.chatGPTMessage provider:@"chatgpt"];
+    [self addProviderNamed:@"Claude" plan:self.claudePlan state:self.claudeState
+                    limits:self.claudeLimits message:self.claudeMessage provider:@"claude"];
 
     [self addRow:[self footerBlock]];
 
@@ -1064,6 +1431,8 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
 
 @interface AppDelegate ()
 - (void)refreshForced:(BOOL)forced;
+- (void)refreshClaudeForced:(BOOL)forced;
+- (void)refreshChatGPTForced:(BOOL)forced;
 - (void)fetchUsageWithToken:(NSString *)token;
 - (void)continueWithCredentials:(Credentials *)creds;
 - (void)renewCredentials:(Credentials *)creds
@@ -1074,6 +1443,11 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
 - (void)renderState:(UsageState)state
              limits:(NSArray<LimitInfo *> *)limits
             message:(NSString *)message;
+- (void)renderChatGPTState:(UsageState)state
+                    limits:(NSArray<LimitInfo *> *)limits
+                      plan:(NSString *)plan
+                   message:(NSString *)message;
+- (void)renderCombinedState;
 - (void)renderDegradedWithNote:(NSString *)note;
 - (BOOL)adoptClaudeCodeCacheIfNewer;
 - (void)markInFlight:(BOOL)flag;
@@ -1082,11 +1456,17 @@ static NSImage *GaugeImage(NSNumber *fraction, NSGradient *fill) {
 - (NSString *)offlineNote;
 - (void)cacheResponse:(NSData *)data;
 - (BOOL)loadCachedResponse;
+- (BOOL)loadCachedChatGPTResponse;
 @end
 
 static NSString *CachePath(void) {
     return [@"~/Library/Application Support/ClaudeUsageBar/last-response.json"
             stringByExpandingTildeInPath];
+}
+
+static NSString *ChatGPTCachePath(void) {
+    return [[@"~/Library/Application Support/ClaudeUsageBar" stringByExpandingTildeInPath]
+            stringByAppendingPathComponent:@"last-chatgpt-response.json"];
 }
 
 /// Honour a server-supplied Retry-After when there is one.
@@ -1161,6 +1541,17 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
     NSTimer              *_timer;
     NSString             *_planName;
 
+    UsageState            _claudeState;
+    NSString             *_claudeMessage;
+    UsageState            _chatGPTState;
+    NSArray<LimitInfo *> *_chatGPTLimits;
+    NSString             *_chatGPTPlan;
+    NSString             *_chatGPTMessage;
+    NSDate               *_chatGPTLastSuccess;
+    NSDate               *_chatGPTDataAsOf;
+    BOOL                  _chatGPTInFlight;
+    CodexUsageRequest    *_codexUsageRequest;
+
     // Rate-limit discipline. This endpoint is internal and unpublished; it
     // will 429 if polled casually. Cache aggressively, back off on refusal,
     // and keep showing the last good numbers rather than an error.
@@ -1186,6 +1577,9 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
     _popover.behavior = NSPopoverBehaviorTransient;
 
     _planName = [[NSUserDefaults standardUserDefaults] stringForKey:@"PlanName"];
+    _claudeState = UsageStateLoading;
+    _chatGPTState = UsageStateLoading;
+    _chatGPTLimits = @[];
     _lastLimits = @[];
     _backoff = 0;
     [self restoreCooldown];
@@ -1207,6 +1601,7 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
     // Show yesterday's numbers immediately rather than an empty popover. This
     // costs no request, and the live fetch below replaces them if it succeeds.
     [self loadCachedResponse];
+    [self loadCachedChatGPTResponse];
     [self refreshForced:YES];
 
     // Report where macOS actually placed us. The status item can be created
@@ -1237,7 +1632,7 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
 
         BOOL placed = NSWidth(frame) > 0 &&
                       NSMinX(frame) >= 0 && NSMaxX(frame) <= NSWidth(screen);
-        NSLog(@"ClaudeUsageBar: status item x=%.0f-%.0f (width %.0f), screen %.0f, %@, "
+        NSLog(@"AIUsageBar: status item x=%.0f-%.0f (width %.0f), screen %.0f, %@, "
               @"style=%@ — %@", NSMinX(frame), NSMaxX(frame), NSWidth(frame),
               NSWidth(screen), notch, MenuBarStyle(),
               placed ? @"has a slot" : @"NO SLOT (menu bar is full)");
@@ -1245,9 +1640,13 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
 
     _timer = [NSTimer scheduledTimerWithTimeInterval:kRefreshInterval
                                              repeats:YES
-                                               block:^(NSTimer *t) {
+                                               block:^(__unused NSTimer *t) {
         [weakSelf refreshForced:NO];
     }];
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    [_codexUsageRequest cancel];
 }
 
 - (void)togglePopover {
@@ -1267,7 +1666,7 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
 /// which is guaranteed now that every completion hops there first.
 - (void)markInFlight:(BOOL)flag {
     _inFlight = flag;
-    _controller.busy = flag;
+    _controller.busy = (_inFlight || _chatGPTInFlight);
 }
 
 #pragma mark Networking
@@ -1351,7 +1750,7 @@ static BOOL IsTransientNetworkError(NSError *error) {
     [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     [req setValue:@"oauth-2025-04-20" forHTTPHeaderField:@"anthropic-beta"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"ClaudeUsageBar/1.0" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"AIUsageBar/2.0" forHTTPHeaderField:@"User-Agent"];
 
     NSURLSessionDataTask *task =
         [[self session] dataTaskWithRequest:req
@@ -1372,6 +1771,11 @@ static BOOL IsTransientNetworkError(NSError *error) {
 /// `forced` skips the freshness check (the Refresh button), but never skips an
 /// active backoff — retrying into a 429 is what keeps it tripped.
 - (void)refreshForced:(BOOL)forced {
+    [self refreshChatGPTForced:forced];
+    [self refreshClaudeForced:forced];
+}
+
+- (void)refreshClaudeForced:(BOOL)forced {
     NSDate *now = [NSDate date];
 
     // One request chain at a time. Launch fires a refresh, and clicking the
@@ -1444,7 +1848,7 @@ static BOOL IsTransientNetworkError(NSError *error) {
     __weak AppDelegate *weakSelf = self;
     if (_planName.length == 0) {
         [self request:kProfileURL token:token done:^(NSInteger code, NSData *data,
-                                                     NSError *error, NSHTTPURLResponse *http) {
+                                                     __unused NSError *error, NSHTTPURLResponse *http) {
             AppDelegate *strong = weakSelf;
             if (!strong) return;
             if (code == 429 || code >= 500) {
@@ -1574,6 +1978,85 @@ static BOOL IsTransientNetworkError(NSError *error) {
     }];
 }
 
+#pragma mark ChatGPT / Codex usage
+
+- (void)refreshChatGPTForced:(BOOL)forced {
+    NSDate *now = [NSDate date];
+    if (_chatGPTInFlight) return;
+    if (!forced && _chatGPTLastSuccess &&
+        [now timeIntervalSinceDate:_chatGPTLastSuccess] < kFreshnessWindow) return;
+
+    _chatGPTInFlight = YES;
+    _controller.busy = YES;
+    if (_chatGPTLimits.count == 0) {
+        [self renderChatGPTState:UsageStateLoading limits:@[] plan:_chatGPTPlan message:nil];
+    }
+
+    [_codexUsageRequest cancel];
+    _codexUsageRequest = [[CodexUsageRequest alloc] init];
+    __weak AppDelegate *weakSelf = self;
+    [_codexUsageRequest start:^(NSDictionary *result, NSString *failure) {
+        AppDelegate *strong = weakSelf;
+        if (!strong) return;
+        strong->_chatGPTInFlight = NO;
+        strong->_codexUsageRequest = nil;
+        strong->_controller.busy = strong->_inFlight;
+
+        if (!result) {
+            NSString *lower = [failure lowercaseString];
+            BOOL noLogin = [lower containsString:@"not found"] ||
+                           [lower containsString:@"not logged"] ||
+                           [lower containsString:@"sign in"] ||
+                           [lower containsString:@"authentication"];
+            if (strong->_chatGPTLimits.count) {
+                NSString *note = [NSString stringWithFormat:
+                    @"%@ — showing values from %@.", failure ?: @"Refresh failed",
+                    AgeText(strong->_chatGPTDataAsOf)];
+                [strong renderChatGPTState:UsageStateOK limits:strong->_chatGPTLimits
+                                      plan:strong->_chatGPTPlan message:note];
+            } else {
+                [strong renderChatGPTState:(noLogin ? UsageStateNoCredentials : UsageStateError)
+                                     limits:@[] plan:strong->_chatGPTPlan message:failure];
+            }
+            return;
+        }
+
+        NSString *plan = nil;
+        NSArray<LimitInfo *> *limits = ParseChatGPTLimits(result, &plan);
+        if (limits.count == 0) {
+            [strong renderChatGPTState:UsageStateError limits:@[] plan:plan
+                               message:@"Codex returned no ChatGPT plan limits."];
+            return;
+        }
+
+        NSData *cached = [NSJSONSerialization dataWithJSONObject:result options:0 error:NULL];
+        if (cached) {
+            NSString *dir = [ChatGPTCachePath() stringByDeletingLastPathComponent];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                      withIntermediateDirectories:YES attributes:nil error:NULL];
+            [cached writeToFile:ChatGPTCachePath() atomically:YES];
+        }
+
+        NSString *message = nil;
+        if ([result[@"ordinaryUsageAllowed"] isKindOfClass:[NSNumber class]] &&
+            ![result[@"ordinaryUsageAllowed"] boolValue]) {
+            message = @"Included ChatGPT/Codex usage is currently unavailable for this account.";
+        } else {
+            NSDictionary *credits = [result[@"rateLimitResetCredits"] isKindOfClass:[NSDictionary class]]
+                                  ? result[@"rateLimitResetCredits"] : nil;
+            NSInteger count = [Numeric(credits[@"availableCount"]) integerValue];
+            if (count > 0) {
+                message = [NSString stringWithFormat:@"%ld usage reset credit%@ available.",
+                           (long)count, count == 1 ? @"" : @"s"];
+            }
+        }
+
+        strong->_chatGPTLastSuccess = [NSDate date];
+        strong->_chatGPTDataAsOf = strong->_chatGPTLastSuccess;
+        [strong renderChatGPTState:UsageStateOK limits:limits plan:plan message:message];
+    }];
+}
+
 #pragma mark Token renewal
 
 /// POST JSON. Completion lands on the main thread like every other request.
@@ -1586,7 +2069,7 @@ static BOOL IsTransientNetworkError(NSError *error) {
     req.timeoutInterval = 15;
     req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"ClaudeUsageBar/1.0" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"AIUsageBar/2.0" forHTTPHeaderField:@"User-Agent"];
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
 
     NSURLSessionDataTask *task =
@@ -1866,6 +2349,27 @@ static BOOL IsTransientNetworkError(NSError *error) {
     return YES;
 }
 
+- (BOOL)loadCachedChatGPTResponse {
+    NSString *path = ChatGPTCachePath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return NO;
+    NSDictionary *result = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    if (![result isKindOfClass:[NSDictionary class]]) return NO;
+
+    NSString *plan = nil;
+    NSArray<LimitInfo *> *limits = ParseChatGPTLimits(result, &plan);
+    if (limits.count == 0) return NO;
+
+    NSDate *when = [[NSFileManager defaultManager] attributesOfItemAtPath:path
+                                                                   error:NULL][NSFileModificationDate];
+    _chatGPTDataAsOf = when;
+    NSString *note = when
+        ? [NSString stringWithFormat:@"Saved values from %@ — checking…", AgeText(when)]
+        : @"Saved values — checking…";
+    [self renderChatGPTState:UsageStateOK limits:limits plan:plan message:note];
+    return YES;
+}
+
 #pragma mark Rendering
 
 /// Applies the current MenuBarStyle. The status item's width is the sum of what
@@ -1896,46 +2400,104 @@ static BOOL IsTransientNetworkError(NSError *error) {
 - (void)renderState:(UsageState)state
              limits:(NSArray<LimitInfo *> *)limits
             message:(NSString *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self->_controller.state   = state;
-        self->_controller.limits  = limits ?: @[];
-        self->_controller.plan    = self->_planName;
-        self->_controller.message = message;
-        [self->_controller refreshUI];
+    _claudeState = state;
+    _claudeMessage = message;
+    if (state == UsageStateOK) _lastLimits = limits ?: @[];
+    [self renderCombinedState];
+}
 
-        NSStatusBarButton *button = self->_statusItem.button;
-        if (!button) return;
+- (void)renderChatGPTState:(UsageState)state
+                    limits:(NSArray<LimitInfo *> *)limits
+                      plan:(NSString *)plan
+                   message:(NSString *)message {
+    _chatGPTState = state;
+    _chatGPTLimits = limits ?: @[];
+    if (plan.length) _chatGPTPlan = plan;
+    _chatGPTMessage = message;
+    [self renderCombinedState];
+}
 
-        if (state == UsageStateOK && limits.count > 0) {
-            LimitInfo *shown = MenuBarLimit(limits);
-            [self applyButton:GaugeImage(@(RemainingFraction(shown)), GradientForLimit(shown))
-                        title:[NSString stringWithFormat:@"%ld%%", RemainingPercent(shown)]
-                         tone:TextColorForLimit(shown)];
+- (void)renderCombinedState {
+    if (![NSThread isMainThread]) {
+        __weak AppDelegate *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf renderCombinedState]; });
+        return;
+    }
 
-            NSMutableArray *lines = [NSMutableArray array];
-            for (LimitInfo *l in limits) {
-                [lines addObject:[NSString stringWithFormat:@"%@: %ld%% · %@",
-                                  l.title, (long)lround(l.fraction * 100), ResetText(l.resets)]];
-            }
-            button.toolTip = [lines componentsJoinedByString:@"\n"];
-        } else if (state == UsageStateLoading) {
-            [self applyButton:GaugeImage(nil, nil) title:@"…" tone:[NSColor labelColor]];
-            button.toolTip = @"Loading Claude usage…";
-        } else if (state == UsageStateExpired) {
-            [self applyButton:GaugeImage(nil, nil) title:@"!" tone:[NSColor systemRedColor]];
-            button.toolTip = @"Claude sign-in expired and couldn't be renewed — click for a one-click fix";
+    _controller.claudeState = _claudeState;
+    _controller.claudeLimits = (_claudeState == UsageStateOK) ? _lastLimits : @[];
+    _controller.claudePlan = _planName;
+    _controller.claudeMessage = _claudeMessage;
+    _controller.chatGPTState = _chatGPTState;
+    _controller.chatGPTLimits = _chatGPTLimits ?: @[];
+    _controller.chatGPTPlan = _chatGPTPlan;
+    _controller.chatGPTMessage = _chatGPTMessage;
+    [_controller refreshUI];
+
+    NSStatusBarButton *button = _statusItem.button;
+    if (!button) return;
+
+    LimitInfo *chatGPT = (_chatGPTState == UsageStateOK)
+                       ? MenuBarLimit(_chatGPTLimits) : nil;
+    LimitInfo *claude = (_claudeState == UsageStateOK)
+                      ? MenuBarLimit(_lastLimits) : nil;
+
+    if (chatGPT || claude) {
+        long combinedRemaining;
+        if (chatGPT && claude) {
+            combinedRemaining = (long)lround(
+                (RemainingFraction(chatGPT) + RemainingFraction(claude)) * 50.0);
+        } else if (chatGPT) {
+            combinedRemaining = RemainingPercent(chatGPT);
         } else {
-            [self applyButton:GaugeImage(nil, nil) title:@"—" tone:[NSColor labelColor]];
-            button.toolTip = @"Claude usage unavailable — click for details";
+            combinedRemaining = RemainingPercent(claude);
         }
-    });
+        NSString *title = [NSString stringWithFormat:@"%ld%%", combinedRemaining];
+
+        LimitInfo *worst = (!claude || (chatGPT && chatGPT.fraction >= claude.fraction))
+                         ? chatGPT : claude;
+        [self applyButton:CompositeGaugeImage(chatGPT, claude)
+                    title:title tone:TextColorForLimit(worst)];
+
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+        [lines addObject:[NSString stringWithFormat:@"AI Usage · combined 5-hour remaining: %ld%%\n"
+                                                    "ChatGPT: %@ · Claude: %@",
+                          combinedRemaining,
+                          chatGPT ? [NSString stringWithFormat:@"%ld%%", RemainingPercent(chatGPT)] : @"—",
+                          claude ? [NSString stringWithFormat:@"%ld%%", RemainingPercent(claude)] : @"—"]];
+        if (_chatGPTLimits.count) {
+            [lines addObject:_chatGPTPlan.length
+                ? [NSString stringWithFormat:@"\nChatGPT · %@", _chatGPTPlan] : @"\nChatGPT"];
+            for (LimitInfo *limit in _chatGPTLimits) {
+                [lines addObject:[NSString stringWithFormat:@"%@: %ld%% used · %@",
+                                  limit.title, (long)lround(limit.fraction * 100), ResetText(limit.resets)]];
+            }
+        }
+        if (_lastLimits.count && _claudeState == UsageStateOK) {
+            [lines addObject:_planName.length
+                ? [NSString stringWithFormat:@"\nClaude · %@", _planName] : @"\nClaude"];
+            for (LimitInfo *limit in _lastLimits) {
+                [lines addObject:[NSString stringWithFormat:@"%@: %ld%% used · %@",
+                                  limit.title, (long)lround(limit.fraction * 100), ResetText(limit.resets)]];
+            }
+        }
+        button.toolTip = [lines componentsJoinedByString:@"\n"];
+        return;
+    }
+
+    BOOL loading = _claudeState == UsageStateLoading || _chatGPTState == UsageStateLoading;
+    BOOL expired = _claudeState == UsageStateExpired || _chatGPTState == UsageStateExpired;
+    [self applyButton:CompositeGaugeImage(nil, nil)
+                title:(loading ? @"…" : (expired ? @"!" : @"—"))
+                 tone:(expired ? [NSColor systemRedColor] : [NSColor labelColor])];
+    button.toolTip = loading ? @"Loading AI usage…" : @"AI usage unavailable — click for details";
 }
 
 @end
 
 #pragma mark - main
 
-int main(int argc, const char *argv[]) {
+int main(__unused int argc, __unused const char *argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         AppDelegate *delegate = [[AppDelegate alloc] init];
