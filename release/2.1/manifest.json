@@ -9,5 +9,6 @@
     "Reveal panel on ordinary launch or reopen",
     "Quiet login launch with --background"
   ],
-  "credentials_included": false
+  "credentials_included": false,
+  "application_archive_sha256": "75fd8a765f7a70dca99429764485d3b7b119bdbe70d4ce87c4fd9b84bffe8b8e"
 }
