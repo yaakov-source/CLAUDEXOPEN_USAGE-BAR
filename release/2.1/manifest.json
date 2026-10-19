@@ -1,0 +1,13 @@
+{
+  "version": "2.1",
+  "build": 3,
+  "installed_application": "/Applications/AI Usage.app",
+  "executable_sha256": "d43e7c45dfcd96bce4c4e4d352555ac563e03d7afea390022be4ca000d977144",
+  "source_change_commit": "b081d7db0ceb98b607198d82fc261369a46e573f",
+  "release_scope": [
+    "Spotlight application naming",
+    "Reveal panel on ordinary launch or reopen",
+    "Quiet login launch with --background"
+  ],
+  "credentials_included": false
+}
