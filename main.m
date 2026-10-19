@@ -1560,11 +1560,22 @@ static void LogFailure(NSInteger code, NSHTTPURLResponse *http, NSData *body, NS
               placed ? @"has a slot" : @"NO SLOT (menu bar is full)");
     });
 
+    // Login starts quietly; a normal launch from Spotlight opens the panel.
+    if (![[NSProcessInfo processInfo].arguments containsObject:@"--background"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf togglePopover]; });
+    }
+
     _timer = [NSTimer scheduledTimerWithTimeInterval:kRefreshInterval
                                              repeats:YES
                                                block:^(__unused NSTimer *t) {
         [weakSelf refreshForced:NO];
     }];
+}
+
+// Spotlight/Finder reopening should reveal the current readings.
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
+    if (!_popover.isShown) [self togglePopover];
+    return NO;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
